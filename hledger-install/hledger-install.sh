@@ -434,6 +434,9 @@ distro_info() {
       "Ubuntu"*)
         echo "ubuntu;$(perl -ne 'if(/Ubuntu (\d+\.\d+)/) { print $1; }' < /etc/issue)"
         ;;
+      "Linux Mint"*)
+        echo "mint;$(perl -ne 'if(/Linux Mint (\d+\.\d+)/) { print $1; }' < /etc/issue)"
+        ;;
       "Debian"*)
         echo "debian;$(perl -ne 'if(/Debian GNU\/Linux (\d+(\.\d+)?)/) { print $1; }' < /etc/issue)"
         ;;
@@ -474,7 +477,7 @@ GETDISTRO
   fi
 
   case "$DISTRO" in
-    ubuntu)
+    ubuntu|mint)
       do_ubuntu_install "$VERSION"
       ;;
     debian|kali|raspbian)
