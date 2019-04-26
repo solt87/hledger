@@ -1,9 +1,15 @@
-{-# LANGUAGE RecordWildCards, DeriveDataTypeable, FlexibleInstances, TupleSections, OverloadedStrings #-}
 {-|
 
 Postings report, used by the register command.
 
 -}
+
+{-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE TupleSections #-}
 
 module Hledger.Reports.PostingsReport (
   PostingsReport,
@@ -16,6 +22,7 @@ module Hledger.Reports.PostingsReport (
 )
 where
 
+import Control.Applicative ((<|>))
 import Data.List
 import Data.Maybe
 import Data.Ord (comparing)
@@ -55,7 +62,9 @@ type PostingsReportItem = (Maybe Day    -- The posting date, if this is the firs
 -- | Select postings from the journal and add running balance and other
 -- information to make a postings report. Used by eg hledger's register command.
 postingsReport :: ReportOpts -> Query -> Journal -> PostingsReport
-postingsReport opts q j = (totallabel, items)
+postingsReport opts q j =
+  (if value_ opts then prValue opts j else id) $
+  (totallabel, items)
     where
       reportspan = adjustReportDates opts q j
       whichdate = whichDateFromOpts opts
@@ -136,9 +145,6 @@ matchedPostingsBeforeAndDuring opts q j (DateSpan mstart mend) =
       where
         dateq = dbg1 "dateq" $ filterQuery queryIsDateOrDate2 $ dbg1 "q" q  -- XXX confused by multiple date:/date2: ?
 
-negatePostingAmount :: Posting -> Posting
-negatePostingAmount p = p { pamount = negate $ pamount p }
-
 -- | Generate postings report line items from a list of postings or (with
 -- non-Nothing dates attached) summary postings.
 postingsReportItems :: [(Posting,Maybe Day)] -> (Posting,Maybe Day) -> WhichDate -> Int -> MixedAmount -> (Int -> MixedAmount -> MixedAmount -> MixedAmount) -> Int -> [PostingsReportItem]
@@ -218,6 +224,54 @@ summarisePostingsInDateSpan (DateSpan b e) wd depth showempty ps
         where
           bal = if isclipped a then aibalance else aebalance
           isclipped a = accountNameLevel a >= depth
+
+negatePostingAmount :: Posting -> Posting
+negatePostingAmount p = p { pamount = negate $ pamount p }
+
+-- -- | Flip the sign of all amounts in a PostingsReport.
+-- prNegate :: PostingsReport -> PostingsReport
+
+-- | Convert all the posting amounts in a PostingsReport to their
+-- default valuation commodities. This means using the Journal's most
+-- recent applicable market prices before the valuation date.
+-- The valuation date is set with --value-at and can be:
+-- each posting's date,
+-- the last day in the report period (or in the journal if no period,
+-- or the posting dates if journal is empty - shouldn't happen),
+-- or today's date (gives an error if today_ is not set in ReportOpts),
+-- or a specified date.
+prValue :: ReportOpts -> Journal -> PostingsReport -> PostingsReport
+prValue ropts@ReportOpts{..} j@Journal{..} (totallabel, items) = (totallabel, items')
+  where
+    items' = [ (md, md2, desc, p{pamount=val $ pamount p}, val tot)
+             | (md, md2, desc, p, tot) <- items
+             , let val = mixedAmountValue prices (valuationdate $ postingDate p)
+             ]
+    valuationdate pdate =
+      case value_at_ of
+        AtTransaction | interval_ /= NoInterval -> error' "sorry, --value-at=transaction is not yet supported with periodic register reports"  -- XXX
+        AtPeriod      | interval_ /= NoInterval -> error' "sorry, --value-at=transaction is not yet supported with periodic register reports"  -- XXX
+        AtTransaction -> pdate
+        AtPeriod      -> fromMaybe pdate mperiodorjournallastday
+        AtNow         -> case today_ of
+                           Just d  -> d
+                           Nothing -> error' "prValue: ReportOpts today_ is unset so could not satisfy --value-at=now"
+        AtDate d      -> d
+      where
+        mperiodorjournallastday = mperiodlastday <|> journalEndDate False j
+        -- Get the last day of the report period.
+        -- Will be Nothing if no report period is specified, or also
+        -- if ReportOpts does not have today_ set, since we need that
+        -- to get the report period robustly.
+        mperiodlastday :: Maybe Day = do
+          t <- today_
+          let q = queryFromOpts t ropts
+          qend <- queryEndDate False q
+          return $ addDays (-1) qend
+
+    -- prices are in parse order - sort into date then parse order,
+    -- & reversed for quick lookup of the latest price.
+    prices = reverse $ sortOn mpdate jmarketprices
 
 -- tests
 

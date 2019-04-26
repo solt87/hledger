@@ -1,5 +1,5 @@
+{-# LANGUAGE OverloadedStrings #-}
 {-# LANGUAGE ScopedTypeVariables #-}
-{-# LANGUAGE NoOverloadedStrings #-} -- prevent trouble if turned on in ghci
 {-|
 
 Utilities for top-level modules and ghci. See also Hledger.Read and
@@ -12,7 +12,7 @@ module Hledger.Cli.Utils
      withJournalDo,
      writeOutput,
      journalTransform,
-     journalApplyValue,
+     -- journalApplyValue,
      journalAddForecast,
      journalReload,
      journalReloadIfChanged,
@@ -25,6 +25,7 @@ module Hledger.Cli.Utils
      readFileStrictly,
      pivotByOpts,
      anonymiseByOpts,
+     tests_Cli_Utils,
     )
 where
 import Control.Exception as C
@@ -71,17 +72,19 @@ withJournalDo opts cmd = do
   >>= mapM (journalTransform opts)
   >>= either error' cmd
 
--- | Apply some transformations to the journal if specified by options.
--- These include:
+-- | Apply some extra post-parse transformations to the journal, if
+-- specified by options. These happen after journal validation, but
+-- before report calculation. They include:
 --
 -- - adding forecast transactions (--forecast)
--- - converting amounts to market value (--value)
 -- - pivoting account names (--pivot)
 -- - anonymising (--anonymise).
+--
 journalTransform :: CliOpts -> Journal -> IO Journal
-journalTransform opts@CliOpts{reportopts_=ropts} =
+journalTransform opts@CliOpts{reportopts_=_ropts} =
       journalAddForecast opts
-  >=> journalApplyValue ropts
+-- - converting amounts to market value (--value)
+  -- >=> journalApplyValue ropts
   >=> return . pivotByOpts opts
   >=> return . anonymiseByOpts opts
 
@@ -117,21 +120,24 @@ anonymise j
   where
     anon = T.pack . flip showHex "" . (fromIntegral :: Int -> Word32) . hash
 
--- TODO move journalApplyValue and friends to Hledger.Data.Journal ? They are here because they use ReportOpts
+-- TODO move journalApplyValue and friends to Hledger.Data.Journal ?
+-- They are here because they use ReportOpts
 
--- | If -V/--value was requested, convert all journal amounts to their market value
--- as of the report end date. Cf http://hledger.org/manual.html#market-value
--- Since 2017/4 we do this early, before commands run, which affects all commands
--- and seems to have the same effect as doing it last on the reported values.
-journalApplyValue :: ReportOpts -> Journal -> IO Journal
-journalApplyValue ropts j = do
-    today <- getCurrentDay
-    mspecifiedenddate <- specifiedEndDate ropts
-    let d = fromMaybe today mspecifiedenddate
-        ps = sortOn mpdate $ jmarketprices j
-        convert | value_ ropts = overJournalAmounts (amountValue ps d)
-                | otherwise    = id
-    return $ convert j
+-- XXX we might still use this for --value-date=transaction
+-- -- | Convert all the journal's posting amounts to their market value as of 
+-- -- each posting's date.
+-- -- Cf http://hledger.org/manual.html#market-value
+-- journalApplyValue :: ReportOpts -> Journal -> IO Journal
+-- journalApplyValue ropts j = do
+--     today <- getCurrentDay
+--     mspecifiedenddate <- specifiedEndDate ropts
+--     let d = fromMaybe today mspecifiedenddate
+--         -- prices are in parse order - sort into date then parse order,
+--         -- reversed for quick lookup of the latest price.
+--         ps = reverse $ sortOn mpdate $ jmarketprices j
+--         convert | value_ ropts = overJournalAmounts (amountValue ps d)
+--                 | otherwise    = id
+--     return $ convert j
 
 -- | Generate periodic transactions from all periodic transaction rules in the journal.
 -- These transactions are added to the in-memory Journal (but not the on-disk file).
@@ -145,8 +151,8 @@ journalAddForecast opts@CliOpts{inputopts_=iopts, reportopts_=ropts} j = do
   today <- getCurrentDay
 
   -- "They start on or after the day following the latest normal transaction in the journal, or today if there are none."
-  let DateSpan _ mjournalend = dbg2 "journalspan"   $ journalDateSpan False j  -- ignore secondary dates
-      forecaststart          = dbg2 "forecaststart" $ fromMaybe today mjournalend
+  let mjournalend   = dbg2 "journalEndDate" $ journalEndDate False j  -- ignore secondary dates
+      forecaststart = dbg2 "forecaststart" $ fromMaybe today mjournalend
 
   -- "They end on or before the specified report end date, or 180 days from today if unspecified."
   mspecifiedend <-  snd . dbg2 "specifieddates" <$> specifiedStartEndDates ropts
@@ -232,7 +238,7 @@ fileModificationTime f
     | otherwise = (do
         utc <- getModificationTime f
         let nom = utcTimeToPOSIXSeconds utc
-        let clo = TOD (read $ takeWhile (`elem` "0123456789") $ show nom) 0 -- XXX read
+        let clo = TOD (read $ takeWhile (`elem` ("0123456789"::String)) $ show nom) 0 -- XXX read
         return clo
         )
         `C.catch` \(_::C.IOException) -> getClockTime
@@ -296,3 +302,30 @@ backupNumber :: FilePath -> FilePath -> Maybe Int
 backupNumber f g = case g =~ ("^" ++ f ++ "\\.([0-9]+)$") of
                         (_::FilePath, _::FilePath, _::FilePath, [ext::FilePath]) -> readMay ext
                         _ -> Nothing
+
+tests_Cli_Utils = tests "Utils" [
+
+  --  tests "journalApplyValue" [
+  --    -- Print the time required to convert one of the sample journals' amounts to value.
+  --    -- Pretty clunky, but working.
+  --    -- XXX sample.journal has no price records, but is always present.
+  --    -- Change to eg examples/5000x1000x10.journal to make this useful.
+  --    test "time" $ do
+  --      ej <- io $ readJournalFile definputopts "examples/3000x1000x10.journal"
+  --      case ej of
+  --        Left e  -> crash $ T.pack e
+  --        Right j -> do
+  --          (t,_) <- io $ timeItT $ do
+  --            -- Enable -V, and ensure the valuation date is later than
+  --            -- all prices for consistent timing.
+  --            let ropts = defreportopts{
+  --              value_=True,
+  --              period_=PeriodTo $ parsedate "3000-01-01"
+  --              }
+  --            j' <- journalApplyValue ropts j
+  --            sum (journalAmounts j') `seq` return ()
+  --          io $ printf "[%.3fs] " t
+  --          ok
+  -- ]
+
+ ]

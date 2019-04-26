@@ -10,6 +10,7 @@ module Hledger.Reports.ReportOptions (
   ReportOpts(..),
   BalanceType(..),
   AccountListMode(..),
+  ValueDate(..),
   FormatStr,
   defreportopts,
   rawOptsToReportOpts,
@@ -72,17 +73,36 @@ data AccountListMode = ALDefault | ALTree | ALFlat deriving (Eq, Show, Data, Typ
 
 instance Default AccountListMode where def = ALDefault
 
+-- | On which date(s) should amount values be calculated ?
+-- UI: --value-at=transaction|period|now|DATE.
+-- ("today" would have been preferable, but clashes with
+-- "transaction" for abbreviating.)
+data ValueDate =
+    AtTransaction  -- ^ Calculate values as of each posting's date
+  | AtPeriod       -- ^ Calculate values as of each report period's last day
+  | AtNow          -- ^ Calculate values as of today (report generation date)
+  | AtDate Day     -- ^ Calculate values as of some other date
+  deriving (Show,Data) -- Eq,Typeable
+
+instance Default ValueDate where def = AtNow
+
 -- | Standard options for customising report filtering and output.
 -- Most of these correspond to standard hledger command-line options
 -- or query arguments, but not all. Some are used only by certain
 -- commands, as noted below. 
 data ReportOpts = ReportOpts {
-     period_         :: Period
+     today_          :: Maybe Day  -- ^ The current date. A late addition to ReportOpts.
+                                   -- Optional, but when set it may affect some reports:
+                                   -- Reports use it when picking a -V valuation date.
+                                   -- This is not great, adds indeterminacy.
+    ,period_         :: Period
     ,interval_       :: Interval
     ,statuses_       :: [Status]  -- ^ Zero, one, or two statuses to be matched
     ,cost_           :: Bool
+    ,value_          :: Bool
+    ,value_at_       :: ValueDate
     ,depth_          :: Maybe Int
-    ,display_        :: Maybe DisplayExp
+    ,display_        :: Maybe DisplayExp  -- XXX unused ?
     ,date2_          :: Bool
     ,empty_          :: Bool
     ,no_elide_       :: Bool
@@ -98,7 +118,6 @@ data ReportOpts = ReportOpts {
     ,drop_           :: Int
     ,row_total_      :: Bool
     ,no_total_       :: Bool
-    ,value_          :: Bool
     ,pretty_tables_  :: Bool
     ,sort_amount_    :: Bool
     ,invert_         :: Bool  -- ^ if true, flip all amount signs in reports
@@ -146,6 +165,8 @@ defreportopts = ReportOpts
     def
     def
     def
+    def
+    def
 
 rawOptsToReportOpts :: RawOpts -> IO ReportOpts
 rawOptsToReportOpts rawopts = checkReportOpts <$> do
@@ -153,10 +174,13 @@ rawOptsToReportOpts rawopts = checkReportOpts <$> do
   d <- getCurrentDay
   color <- hSupportsANSI stdout
   return defreportopts{
-     period_      = periodFromRawOpts d rawopts'
+     today_       = Just d
+    ,period_      = periodFromRawOpts d rawopts'
     ,interval_    = intervalFromRawOpts rawopts'
     ,statuses_    = statusesFromRawOpts rawopts'
     ,cost_        = boolopt "cost" rawopts'
+    ,value_       = or $ map (flip boolopt rawopts') ["value", "value-at"]
+    ,value_at_    = valueDateFromRawOpts rawopts'
     ,depth_       = maybeintopt "depth" rawopts'
     ,display_     = maybedisplayopt d rawopts'
     ,date2_       = boolopt "date2" rawopts'
@@ -172,7 +196,6 @@ rawOptsToReportOpts rawopts = checkReportOpts <$> do
     ,drop_        = intopt "drop" rawopts'
     ,row_total_   = boolopt "row-total" rawopts'
     ,no_total_    = boolopt "no-total" rawopts'
-    ,value_       = boolopt "value" rawopts'
     ,sort_amount_ = boolopt "sort-amount" rawopts'
     ,invert_      = boolopt "invert" rawopts'
     ,pretty_tables_ = boolopt "pretty-tables" rawopts'
@@ -322,6 +345,20 @@ simplifyStatuses l
 reportOptsToggleStatus s ropts@ReportOpts{statuses_=ss}
   | s `elem` ss = ropts{statuses_=filter (/= s) ss}
   | otherwise   = ropts{statuses_=simplifyStatuses (s:ss)}
+
+valueDateFromRawOpts :: RawOpts -> ValueDate
+valueDateFromRawOpts = lastDef AtNow . catMaybes . map valuedatefromrawopt
+  where
+    valuedatefromrawopt (n,v)
+      | n == "value-at" = valuedate v
+      | otherwise       = Nothing
+    valuedate v
+      | v `elem` ["transaction","t"] = Just AtTransaction
+      | v `elem` ["period","p"]      = Just AtPeriod
+      | v `elem` ["now","n"]         = Just AtNow
+      | otherwise = flip maybe (Just . AtDate)
+        (usageError $ "could not parse \""++v++"\" as value date, should be: transaction|period|now|t|p|n|YYYY-MM-DD")
+        (parsedateM v)
 
 type DisplayExp = String
 

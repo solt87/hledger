@@ -4,14 +4,7 @@ Balance report, used by the balance command.
 
 -}
 
-
-
-
-
-
-
-
-{-# LANGUAGE FlexibleInstances, ScopedTypeVariables, OverloadedStrings #-}
+{-# LANGUAGE FlexibleInstances, RecordWildCards, ScopedTypeVariables, OverloadedStrings #-}
 
 module Hledger.Reports.BalanceReport (
   BalanceReport,
@@ -25,6 +18,7 @@ module Hledger.Reports.BalanceReport (
 )
 where
 
+import Control.Applicative ((<|>))
 import Data.List
 import Data.Ord
 import Data.Maybe
@@ -35,12 +29,6 @@ import Hledger.Read (mamountp')
 import Hledger.Query
 import Hledger.Utils 
 import Hledger.Reports.ReportOptions
-
-
-
-
-
-
 
 
 -- | A simple balance report. It has:
@@ -78,7 +66,8 @@ flatShowsExclusiveBalance    = True
 -- eg this can do hierarchical display).
 balanceReport :: ReportOpts -> Query -> Journal -> BalanceReport
 balanceReport opts q j = 
-  (if invert_ opts then brNegate else id) $ 
+  (if invert_ opts then brNegate  else id) $ 
+  (if value_ opts then brValue opts j else id) $
   (sorteditems, total)
     where
       -- dbg1 = const id -- exclude from debug output
@@ -180,6 +169,55 @@ brNegate (is, tot) = (map brItemNegate is, -tot)
   where
     brItemNegate (a, a', d, amt) = (a, a', d, -amt)
 
+-- | Convert all the posting amounts in a BalanceReport to their
+-- default valuation commodities. This means using the Journal's most
+-- recent applicable market prices before the valuation date.
+-- The valuation date is set with --value-at and can be:
+-- each posting's date,
+-- the last day in the report period (or in the journal if no period,
+-- or gives an error if journal is empty - shouldn't happen),
+-- or today's date (gives an error if today_ is not set in ReportOpts),
+-- or a specified date.
+brValue :: ReportOpts -> Journal -> BalanceReport -> BalanceReport
+brValue ropts@ReportOpts{..} j (items, total) =
+  ([ (n, n', i, mixedAmountValue prices d a) | (n,n',i,a) <- items ]
+  ,mixedAmountValue prices d total
+  )
+  where
+    -- prices are in parse order - sort into date then parse order,
+    -- & reversed for quick lookup of the latest price.
+    prices = reverse $ sortOn mpdate $ jmarketprices j
+    d = case value_at_ of
+      AtTransaction -> error' "sorry, --value-at=transaction is not yet supported with balance reports"  -- XXX
+      AtPeriod      -> fromMaybe (error' "brValue: expected a non-empty journal") mperiodorjournallastday  -- XXX shouldn't happen
+      AtNow         -> case today_ of
+                         Just d  -> d
+                         Nothing -> error' "brValue: ReportOpts today_ is unset so could not satisfy --value-at=now"
+      AtDate d      -> d
+
+    -- Get the last day of the report period.
+    -- Will be Nothing if no report period is specified, or also
+    -- if ReportOpts does not have today_ set, since we need that
+    -- to get the report period robustly.
+    mperiodlastday :: Maybe Day = do
+      t <- today_
+      let q = queryFromOpts t ropts
+      qend <- queryEndDate False q
+      return $ addDays (-1) qend
+
+    mperiodorjournallastday = mperiodlastday <|> journalEndDate False j
+    
+-- -- | Find the best commodity to convert to when asked to show the
+-- -- market value of this commodity on the given date. That is, the one
+-- -- in which it has most recently been market-priced, ie the commodity
+-- -- mentioned in the most recent applicable historical price directive
+-- -- before this date.
+-- -- defaultValuationCommodity :: Journal -> Day -> CommoditySymbol -> Maybe CommoditySymbol
+-- -- defaultValuationCommodity j d c = mpamount <$> commodityValue j d c
+
+
+-- tests
+
 Right samplejournal2 =
   journalBalanceTransactions False
     nulljournal{
@@ -202,8 +240,6 @@ Right samplejournal2 =
         }
       ]
     }
-
--- tests
 
 tests_BalanceReport = tests "BalanceReport" [
   tests "balanceReport" $

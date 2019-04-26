@@ -1,4 +1,4 @@
-{-# LANGUAGE FlexibleInstances, ScopedTypeVariables, OverloadedStrings #-}
+{-# LANGUAGE FlexibleInstances, RecordWildCards, ScopedTypeVariables, OverloadedStrings #-}
 {-|
 
 Multi-column balance reports, used by the balance command.
@@ -85,6 +85,7 @@ type ClippedAccountName = AccountName
 multiBalanceReport :: ReportOpts -> Query -> Journal -> MultiBalanceReport
 multiBalanceReport opts q j =
   (if invert_ opts then mbrNegate else id) $ 
+  (if value_ opts then mbrValue opts j else id) $
   MultiBalanceReport (displayspans, sorteditems, totalsrow)
     where
       symq       = dbg1 "symq"   $ filterQuery queryIsSym $ dbg1 "requested q" q
@@ -270,6 +271,40 @@ mbrNegate (MultiBalanceReport (colspans, rows, totalsrow)) =
 multiBalanceReportSpan :: MultiBalanceReport -> DateSpan
 multiBalanceReportSpan (MultiBalanceReport ([], _, _))       = DateSpan Nothing Nothing
 multiBalanceReportSpan (MultiBalanceReport (colspans, _, _)) = DateSpan (spanStart $ head colspans) (spanEnd $ last colspans)
+
+-- | Convert all the posting amounts in a MultiBalanceReport to their
+-- default valuation commodities. This means using the Journal's most
+-- recent applicable market prices before the valuation date.
+-- The valuation date is set with --value-at and can be:
+-- each posting's date,
+-- or the last day in the report subperiod,
+-- or today's date (gives an error if today_ is not set in ReportOpts),
+-- or a specified date.
+mbrValue :: ReportOpts -> Journal -> MultiBalanceReport -> MultiBalanceReport
+mbrValue ReportOpts{..} Journal{..} (MultiBalanceReport (spans, rows, (coltotals, rowtotaltotal, rowavgtotal))) =
+  MultiBalanceReport (
+     spans
+    ,[(acct, acct', depth, map (uncurry val) $ zip ends rowamts, val end rowtotal, val end rowavg)
+     | (acct, acct', depth, rowamts, rowtotal, rowavg) <- rows]
+    ,(map (uncurry val) $ zip ends coltotals
+     ,val end rowtotaltotal
+     ,val end rowavgtotal)
+    )
+  where
+    ends = map (fromMaybe (error' "mbrValue: expected all report periods to have an end date") . spanEnd) spans  -- XXX shouldn't happen
+    end  = lastDef (error' "mbrValue: expected at least one report subperiod") ends  -- XXX shouldn't happen
+    val periodend amt = mixedAmountValue prices d amt
+      where
+        -- prices are in parse order - sort into date then parse order,
+        -- & reversed for quick lookup of the latest price.
+        prices = reverse $ sortOn mpdate jmarketprices
+        d = case value_at_ of
+          AtTransaction -> error' "sorry, --value-at=transaction is not yet supported with balance reports"  -- XXX
+          AtPeriod      -> periodend
+          AtNow         -> case today_ of
+                             Just d  -> d
+                             Nothing -> error' "mbrValue: ReportOpts today_ is unset so could not satisfy --value-at=now"
+          AtDate d      -> d
 
 -- | Generates a simple non-columnar BalanceReport, but using multiBalanceReport, 
 -- in order to support --historical. Does not support tree-mode boring parent eliding. 
